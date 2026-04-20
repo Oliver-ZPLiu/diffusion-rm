@@ -225,7 +225,7 @@ def main():
         # Evaluate
         all_pickscores = []
 
-        with accelerator.autocast(), torch.no_grad():
+        with torch.autocast("cuda", dtype=torch_dtype), torch.no_grad():
             for batch_idx, prompts in enumerate(dataloader):
                 # Compute text embeddings
                 prompt_embeds, pooled_prompt_embeds = sd3_encode_prompt(

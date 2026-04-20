@@ -225,7 +225,7 @@ def main():
         # Evaluate
         all_pickscores = []
 
-        with accelerator.autocast(), torch.no_grad():
+        with torch.autocast("cuda", dtype=torch_dtype), torch.no_grad():
             for batch_idx, prompts in enumerate(dataloader):
                 if accelerator.is_local_main_process:
                     print(f"  Batch {batch_idx + 1}/{len(dataloader)}", end="")
