@@ -60,10 +60,10 @@ def parse_args():
                         help="Device to use")
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         help="Data type (float32, bfloat16, float16)")
-    parser.add_argument("--noise_level", type=float, default=0.8,
-                        help="Noise level for SDE sampling")
-    parser.add_argument("--sde_window_size", type=int, default=3,
-                        help="SDE window size")
+    parser.add_argument("--noise_level", type=float, default=0,
+                        help="Noise level for SDE sampling (0 for evaluation)")
+    parser.add_argument("--sde_window_size", type=int, default=0,
+                        help="SDE window size (0 for evaluation)")
     parser.add_argument("--sde_type", type=str, default="discrete",
                         help="SDE type (discrete, cps, etc.)")
     return parser.parse_args()
