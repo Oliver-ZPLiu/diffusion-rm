@@ -16,8 +16,8 @@ from accelerate import Accelerator
 from diffusers import FluxPipeline, StableDiffusion3Pipeline
 from torch.utils.data import Dataset, DataLoader
 
-from flow_grpo.diffusers_patch.flux_pipeline_with_logprob_fast import flux_pipeline_with_logprob
-from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob_fast import sd3_pipeline_with_logprob
+from flow_grpo.diffusers_patch.flux_pipeline_with_logprob_fast import pipeline_with_logprob as flux_pipeline_with_logprob
+from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob_fast import pipeline_with_logprob as sd3_pipeline_with_logprob
 from flow_grpo.diffusers_patch.train_dreambooth_lora_flux import encode_prompt as flux_encode_prompt
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt as sd3_encode_prompt
 from flow_grpo.pickscore_scorer import PickScoreScorer

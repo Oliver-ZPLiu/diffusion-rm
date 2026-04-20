@@ -1,25 +1,28 @@
 #!/bin/bash
-# Evaluate checkpoints on PickScore
-# Usage: bash scripts/single_node/evals/eval_pickscore.sh
+# Multi-GPU PickScore evaluation
+# Usage: bash scripts/single_node/evals/eval_pickscore_multinode.sh
 
 # ============ 配置参数 ============
+
+# GPU 数量
+NUM_GPUS=8
 
 # checkpoint 目录 (修改为你的路径)
 CHECKPOINT_DIR="logs/GRPO-Fast-nocfg-OurRM-0.2_proxy_adv_clip3e-6_lr5e-5-update_2026.04.18_09.48.56/checkpoints"
 
 # 评测范围和间隔
 START_STEP=120
-END_STEP=""            # 留空表示评测到最后一个 checkpoint
+END_STEP=2400
 EVAL_INTERVAL=120
 
 # 测试数据集
 TEST_PROMPTS="dataset/pickscore/test.txt"
 
-# 基础模型 (SD3.5 Medium 用于 pickscore_sd3_fast_rm)
+# 基础模型
 BASE_MODEL_PATH="/models/stable-diffusion-3.5-medium"
 
 # 推理参数 (评测时用，与 train_sd3_fast_rm.py eval 阶段一致)
-BATCH_SIZE=4
+BATCH_SIZE=1              # 每张 GPU 的 batch size
 NUM_INFERENCE_STEPS=40
 GUIDANCE_SCALE=4.5
 RESOLUTION=512
@@ -33,16 +36,18 @@ OUTPUT_JSON="eval_results/pickscore_results.json"
 # ============ 执行评测 ============
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Go up to project root: scripts/single_node/[evals/] -> project root
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 cd "${PROJECT_DIR}"
 
-# 设置 PYTHONPATH 以便找到 flow_grpo 模块
+# 设置 PYTHONPATH
 export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH}"
 
-# 构建命令
-CMD="python scripts/eval_pickscore_checkpoints.py \
+# 构建 accelerate 命令
+CMD="accelerate launch \
+    --num_processes=${NUM_GPUS} \
+    --main_training_function main \
+    scripts/eval_pickscore_checkpoints_multinode.py \
     --checkpoint_dir '${CHECKPOINT_DIR}' \
     --base_model_path '${BASE_MODEL_PATH}' \
     --start_step ${START_STEP} \
@@ -63,10 +68,11 @@ if [ -n "${END_STEP}" ]; then
 fi
 
 # 执行
-echo "Running PickScore evaluation..."
+echo "Running Multi-GPU PickScore evaluation..."
+echo "Number of GPUs: ${NUM_GPUS}"
 echo "Checkpoint dir: ${CHECKPOINT_DIR}"
 echo "Start step: ${START_STEP}, End step: ${END_STEP:-'last'}, Interval: ${EVAL_INTERVAL}"
-echo "Inference: steps=${NUM_INFERENCE_STEPS}, guidance=${GUIDANCE_SCALE}, noise=${NOISE_LEVEL}, sde_window=${SDE_WINDOW_SIZE}, sde_type=${SDE_TYPE}"
+echo "Inference: steps=${NUM_INFERENCE_STEPS}, guidance=${GUIDANCE_SCALE}, batch_size=${BATCH_SIZE}/GPU"
 echo ""
 
 eval ${CMD}
