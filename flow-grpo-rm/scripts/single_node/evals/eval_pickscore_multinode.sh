@@ -49,6 +49,7 @@ export RANK_0_PORT=29501
 # 构建 accelerate 命令
 CMD="accelerate launch \
     --num_processes=${NUM_GPUS} \
+    --mixed_precision bf16 \
     --main_training_function main \
     scripts/eval_pickscore_checkpoints_multinode.py \
     --checkpoint_dir '${CHECKPOINT_DIR}' \
