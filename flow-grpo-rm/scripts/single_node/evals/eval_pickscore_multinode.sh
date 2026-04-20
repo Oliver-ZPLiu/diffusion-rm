@@ -28,7 +28,7 @@ GUIDANCE_SCALE=4.5
 RESOLUTION=512
 NOISE_LEVEL=0
 SDE_WINDOW_SIZE=0
-SDE_TYPE="discrete"
+SDE_TYPE="cps"
 
 # 输出结果文件
 OUTPUT_JSON="eval_results/pickscore_results.json"

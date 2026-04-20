@@ -57,8 +57,8 @@ def parse_args():
                         help="Noise level for SDE sampling (0 for evaluation)")
     parser.add_argument("--sde_window_size", type=int, default=0,
                         help="SDE window size (0 for evaluation)")
-    parser.add_argument("--sde_type", type=str, default="discrete",
-                        help="SDE type (discrete, cps, etc.)")
+    parser.add_argument("--sde_type", type=str, default="cps",
+                        help="SDE type (cps, sde)")
     return parser.parse_args()
 
 
