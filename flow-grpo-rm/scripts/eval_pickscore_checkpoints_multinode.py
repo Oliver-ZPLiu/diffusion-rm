@@ -142,8 +142,14 @@ def main():
         args.base_model_path,
         torch_dtype=torch_dtype,
     )
-    pipeline.enable_model_cpu_offload()
     pipeline.pipeline_id = args.base_model_path
+
+    # Move all components to GPU (consistent with training eval phase)
+    pipeline.vae.to(accelerator.device, dtype=torch_dtype)
+    pipeline.text_encoder.to(accelerator.device, dtype=torch_dtype)
+    pipeline.text_encoder_2.to(accelerator.device, dtype=torch_dtype)
+    pipeline.text_encoder_3.to(accelerator.device, dtype=torch_dtype)
+    pipeline.transformer.to(accelerator.device, dtype=torch_dtype)
 
     # Load test prompts
     prompts_path = args.test_prompts_path
@@ -159,7 +165,7 @@ def main():
         num_replicas=accelerator.num_processes,
         rank=accelerator.process_index,
         shuffle=False,
-        drop_last=False
+        drop_last=True
     )
     sampler.set_epoch(0)  # Required for DistributedSampler
     dataloader = DataLoader(
@@ -183,8 +189,15 @@ def main():
     )
 
     # Text encoders and tokenizers for SD3
-    text_encoders = [pipeline.transformer, pipeline.text_encoder_2, pipeline.text_encoder_3]
+    text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]
     tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2, pipeline.tokenizer_3]
+
+    # Pre-compute negative embeddings from empty string (consistent with training)
+    neg_prompt_embeds, neg_pooled_prompt_embeds = sd3_encode_prompt(
+        text_encoders, tokenizers, [""], 128, device=accelerator.device
+    )
+    neg_prompt_embeds_batch = neg_prompt_embeds.repeat(args.batch_size, 1, 1)
+    neg_pooled_prompt_embeds_batch = neg_pooled_prompt_embeds.repeat(args.batch_size, 1)
 
     # Store results (only on main process)
     results = {}
@@ -216,18 +229,23 @@ def main():
             for batch_idx, prompts in enumerate(dataloader):
                 # Compute text embeddings
                 prompt_embeds, pooled_prompt_embeds = sd3_encode_prompt(
-                    text_encoders, tokenizers, prompts, 512
+                    text_encoders, tokenizers, prompts, 128, device=accelerator.device
                 )
                 prompt_embeds = prompt_embeds.to(accelerator.device)
                 pooled_prompt_embeds = pooled_prompt_embeds.to(accelerator.device)
 
+                # Slice negative embeddings to match actual batch size
+                bs = prompt_embeds.shape[0]
+                neg_embeds = neg_prompt_embeds_batch[:bs]
+                neg_pooled_embeds = neg_pooled_prompt_embeds_batch[:bs]
+
                 # Generate images
-                images, _, _, _, _, _ = sd3_pipeline_with_logprob(
+                images = sd3_pipeline_with_logprob(
                     pipeline,
                     prompt_embeds=prompt_embeds,
-                    negative_prompt_embeds=torch.zeros_like(prompt_embeds),
+                    negative_prompt_embeds=neg_embeds,
                     pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_pooled_prompt_embeds=torch.zeros_like(pooled_prompt_embeds),
+                    negative_pooled_prompt_embeds=neg_pooled_embeds,
                     num_inference_steps=args.num_inference_steps,
                     guidance_scale=args.guidance_scale,
                     output_type="pt",
@@ -236,7 +254,7 @@ def main():
                     noise_level=args.noise_level,
                     sde_window_size=args.sde_window_size,
                     sde_type=args.sde_type,
-                )
+                )[0]
 
                 # Compute PickScore
                 scores = pickscore_scorer(prompts, images)

@@ -43,6 +43,9 @@ cd "${PROJECT_DIR}"
 # 设置 PYTHONPATH
 export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH}"
 
+# 设置分布式训练端口（默认 29500，被占用时可修改）
+export RANK_0_PORT=29501
+
 # 构建 accelerate 命令
 CMD="accelerate launch \
     --num_processes=${NUM_GPUS} \

@@ -108,16 +108,15 @@ def find_available_checkpoints(checkpoint_dir, start_step, end_step, interval):
 def compute_text_embeddings(prompt, text_encoders, tokenizers, max_sequence_length, device, is_sd3=False):
     with torch.no_grad():
         if is_sd3:
-            prompt_embeds, pooled_prompt_embeds, text_ids = sd3_encode_prompt(
-                text_encoders, tokenizers, prompt, max_sequence_length
+            prompt_embeds, pooled_prompt_embeds = sd3_encode_prompt(
+                text_encoders, tokenizers, prompt, max_sequence_length, device=device
             )
         else:
-            prompt_embeds, pooled_prompt_embeds, text_ids = flux_encode_prompt(
+            prompt_embeds, pooled_prompt_embeds = flux_encode_prompt(
                 text_encoders, tokenizers, prompt, max_sequence_length
             )
         prompt_embeds = prompt_embeds.to(device)
         pooled_prompt_embeds = pooled_prompt_embeds.to(device)
-        text_ids = text_ids.to(device)
     return prompt_embeds, pooled_prompt_embeds
 
 
@@ -160,8 +159,14 @@ def main():
             args.base_model_path,
             torch_dtype=torch_dtype,
         )
-        pipeline.enable_model_cpu_offload()
         pipeline.pipeline_id = args.base_model_path
+
+        # Move all components to GPU (consistent with training eval phase)
+        pipeline.vae.to(accelerator.device, dtype=torch_dtype)
+        pipeline.text_encoder.to(accelerator.device, dtype=torch_dtype)
+        pipeline.text_encoder_2.to(accelerator.device, dtype=torch_dtype)
+        pipeline.text_encoder_3.to(accelerator.device, dtype=torch_dtype)
+        pipeline.transformer.to(accelerator.device, dtype=torch_dtype)
     else:
         pipeline = FluxPipeline.from_pretrained(
             args.base_model_path,
@@ -191,6 +196,16 @@ def main():
         dtype=torch.float32
     )
 
+    # Pre-compute negative embeddings for SD3
+    if is_sd3:
+        sd3_text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]
+        sd3_tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2, pipeline.tokenizer_3]
+        neg_prompt_embeds, neg_pooled_prompt_embeds = sd3_encode_prompt(
+            sd3_text_encoders, sd3_tokenizers, [""], 128, device=accelerator.device
+        )
+        neg_prompt_embeds_batch = neg_prompt_embeds.repeat(args.batch_size, 1, 1)
+        neg_pooled_prompt_embeds_batch = neg_pooled_prompt_embeds.repeat(args.batch_size, 1)
+
     # Store results
     results = {}
 
@@ -217,7 +232,7 @@ def main():
 
                 # Get correct text encoders and tokenizers based on model type
                 if is_sd3:
-                    text_encoders = [pipeline.transformer, pipeline.text_encoder_2, pipeline.text_encoder_3]
+                    text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]
                     tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2, pipeline.tokenizer_3]
                 else:
                     text_encoders = pipeline.text_encoder
@@ -228,19 +243,22 @@ def main():
                     prompts,
                     text_encoders,
                     tokenizers,
-                    max_sequence_length=512,
+                    max_sequence_length=128,
                     device=accelerator.device,
                     is_sd3=is_sd3
                 )
 
                 # Generate images using the appropriate pipeline function
                 if is_sd3:
-                    images, _, _, _, _, _ = sd3_pipeline_with_logprob(
+                    bs = prompt_embeds.shape[0]
+                    neg_embeds = neg_prompt_embeds_batch[:bs]
+                    neg_pooled_embeds = neg_pooled_prompt_embeds_batch[:bs]
+                    images = sd3_pipeline_with_logprob(
                         pipeline,
                         prompt_embeds=prompt_embeds,
-                        negative_prompt_embeds=torch.zeros_like(prompt_embeds),
+                        negative_prompt_embeds=neg_embeds,
                         pooled_prompt_embeds=pooled_prompt_embeds,
-                        negative_pooled_prompt_embeds=torch.zeros_like(pooled_prompt_embeds),
+                        negative_pooled_prompt_embeds=neg_pooled_embeds,
                         num_inference_steps=args.num_inference_steps,
                         guidance_scale=args.guidance_scale,
                         output_type="pt",
@@ -249,9 +267,9 @@ def main():
                         noise_level=args.noise_level,
                         sde_window_size=args.sde_window_size,
                         sde_type=args.sde_type,
-                    )
+                    )[0]
                 else:
-                    images, _, _, _, _, _ = flux_pipeline_with_logprob(
+                    images = flux_pipeline_with_logprob(
                         pipeline,
                         prompt_embeds=prompt_embeds,
                         pooled_prompt_embeds=pooled_prompt_embeds,
@@ -263,7 +281,7 @@ def main():
                         noise_level=args.noise_level,
                         sde_window_size=args.sde_window_size,
                         sde_type=args.sde_type,
-                    )
+                    )[0]
 
                 # Compute PickScore
                 scores = pickscore_scorer(prompts, images)
