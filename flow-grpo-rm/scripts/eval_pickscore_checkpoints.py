@@ -1,0 +1,255 @@
+#!/usr/bin/env python
+# Copyright 2025 Bytedance Ltd. and/or its affiliates.
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+import argparse
+import json
+import tempfile
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+import torch
+from PIL import Image
+from accelerate import Accelerator
+from diffusers import FluxPipeline
+from torch.utils.data import Dataset, DataLoader
+
+from flow_grpo.diffusers_patch.flux_pipeline_with_logprob_fast import pipeline_with_logprob
+from flow_grpo.diffusers_patch.train_dreambooth_lora_flux import encode_prompt
+from flow_grpo.pickscore_scorer import PickScoreScorer
+from peft import PeftModel
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate checkpoints on PickScore")
+    parser.add_argument("--checkpoint_dir", type=str, required=True,
+                        help="Path to checkpoints directory")
+    parser.add_argument("--base_model_path", type=str,
+                        default="black-forest-labs/FLUX.1-dev",
+                        help="Base model path for pipeline")
+    parser.add_argument("--start_step", type=int, default=120,
+                        help="Starting checkpoint step")
+    parser.add_argument("--end_step", type=int, default=None,
+                        help="Ending checkpoint step (None = last available)")
+    parser.add_argument("--eval_interval", type=int, default=120,
+                        help="Evaluation interval in steps")
+    parser.add_argument("--test_prompts_path", type=str,
+                        default="dataset/pickscore/test.txt",
+                        help="Path to test prompts file")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Batch size for generation")
+    parser.add_argument("--num_inference_steps", type=int, default=50,
+                        help="Number of inference steps")
+    parser.add_argument("--guidance_scale", type=float, default=3.5,
+                        help="Guidance scale for generation")
+    parser.add_argument("--resolution", type=int, default=512,
+                        help="Image resolution")
+    parser.add_argument("--output_json", type=str, default=None,
+                        help="Path to save results as JSON")
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Device to use")
+    parser.add_argument("--dtype", type=str, default="bfloat16",
+                        help="Data type (float32, bfloat16, float16)")
+    return parser.parse_args()
+
+
+class PromptDataset(Dataset):
+    def __init__(self, file_path):
+        self.prompts = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    self.prompts.append(line)
+
+    def __len__(self):
+        return len(self.prompts)
+
+    def __getitem__(self, idx):
+        return self.prompts[idx]
+
+
+def find_available_checkpoints(checkpoint_dir, start_step, end_step, interval):
+    checkpoints = []
+    if not os.path.exists(checkpoint_dir):
+        return checkpoints
+
+    for item in os.listdir(checkpoint_dir):
+        if item.startswith("checkpoint-"):
+            try:
+                step = int(item.split("-")[1])
+                if step >= start_step:
+                    if end_step is None or step <= end_step:
+                        if (step - start_step) % interval == 0:
+                            checkpoints.append((step, os.path.join(checkpoint_dir, item)))
+            except ValueError:
+                continue
+
+    checkpoints.sort(key=lambda x: x[0])
+    return checkpoints
+
+
+def compute_text_embeddings(prompt, text_encoders, tokenizers, max_sequence_length, device):
+    with torch.no_grad():
+        prompt_embeds, pooled_prompt_embeds, text_ids = encode_prompt(
+            text_encoders, tokenizers, prompt, max_sequence_length
+        )
+        prompt_embeds = prompt_embeds.to(device)
+        pooled_prompt_embeds = pooled_prompt_embeds.to(device)
+        text_ids = text_ids.to(device)
+    return prompt_embeds, pooled_prompt_embeds
+
+
+def main():
+    args = parse_args()
+
+    # Parse dtype
+    dtype_map = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }
+    torch_dtype = dtype_map.get(args.dtype, torch.bfloat16)
+
+    # Initialize accelerator
+    accelerator = Accelerator()
+
+    # Find available checkpoints
+    checkpoints = find_available_checkpoints(
+        args.checkpoint_dir, args.start_step, args.end_step, args.eval_interval
+    )
+
+    if not checkpoints:
+        print(f"No checkpoints found in {args.checkpoint_dir}")
+        print(f"Start: {args.start_step}, End: {args.end_step}, Interval: {args.eval_interval}")
+        return
+
+    print(f"Found {len(checkpoints)} checkpoints to evaluate:")
+    for step, path in checkpoints:
+        print(f"  - checkpoint-{step}")
+    print()
+
+    # Load base pipeline
+    print("Loading base pipeline...")
+    pipeline = FluxPipeline.from_pretrained(
+        args.base_model_path,
+        torch_dtype=torch_dtype,
+        variant="fp16" if torch_dtype == torch.float16 else None,
+    )
+    pipeline = pipeline.to(accelerator.device)
+
+    # Load test prompts
+    prompts_path = args.test_prompts_path
+    if not os.path.isabs(prompts_path):
+        prompts_path = os.path.join(os.path.dirname(__file__), "..", prompts_path)
+
+    dataset = PromptDataset(prompts_path)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+
+    print(f"Loaded {len(dataset)} test prompts")
+    print()
+
+    # Initialize PickScore scorer
+    print("Initializing PickScore scorer...")
+    pickscore_scorer = PickScoreScorer(
+        device=accelerator.device,
+        dtype=torch.float32
+    )
+
+    # Store results
+    results = {}
+
+    # Evaluate each checkpoint
+    for step, checkpoint_path in checkpoints:
+        print(f"\n{'='*60}")
+        print(f"Evaluating checkpoint-{step}")
+        print(f"{'='*60}")
+
+        # Load LoRA weights
+        lora_path = os.path.join(checkpoint_path, "lora")
+        if os.path.exists(lora_path):
+            pipeline.load_lora_weights(lora_path)
+        else:
+            print(f"Warning: LoRA path not found at {lora_path}, using base model")
+
+        # Evaluate
+        all_pickscores = []
+
+        with torch.no_grad():
+            for batch_idx, prompts in enumerate(dataloader):
+                if accelerator.is_local_main_process:
+                    print(f"  Batch {batch_idx + 1}/{len(dataloader)}", end="")
+
+                # Compute text embeddings
+                prompt_embeds, pooled_prompt_embeds = compute_text_embeddings(
+                    prompts,
+                    pipeline.text_encoder,
+                    pipeline.tokenizer,
+                    max_sequence_length=512,
+                    device=accelerator.device
+                )
+
+                # Generate images
+                images, _, _, _, _, _ = pipeline_with_logprob(
+                    pipeline,
+                    prompt_embeds=prompt_embeds,
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    num_inference_steps=args.num_inference_steps,
+                    guidance_scale=args.guidance_scale,
+                    output_type="pt",
+                    height=args.resolution,
+                    width=args.resolution,
+                    noise_level=0,
+                    sde_window_size=0,
+                    sde_type="discrete",
+                )
+
+                # Compute PickScore
+                scores = pickscore_scorer(prompts, images)
+                all_pickscores.extend(scores.cpu().tolist())
+
+                if accelerator.is_local_main_process:
+                    print(f" - Mean PickScore: {np.mean(scores.cpu().tolist()):.4f}")
+
+        # Gather results from all processes
+        all_pickscores = accelerator.gather(torch.tensor(all_pickscores, device=accelerator.device)).cpu().numpy()
+
+        mean_score = np.mean(all_pickscores)
+        std_score = np.std(all_pickscores)
+
+        results[step] = {
+            "mean": float(mean_score),
+            "std": float(std_score),
+            "num_samples": len(all_pickscores)
+        }
+
+        print(f"\n  checkpoint-{step}: PickScore = {mean_score:.4f} (±{std_score:.4f})")
+
+        # Unload LoRA for next iteration
+        if os.path.exists(lora_path):
+            pipeline.unload_lora_weights()
+
+    # Print summary
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
+    print(f"{'Checkpoint':<20} {'PickScore':<15} {'Std':<10} {'Samples':<10}")
+    print("-"*60)
+    for step in sorted(results.keys()):
+        r = results[step]
+        print(f"checkpoint-{step:<7} {r['mean']:.4f} (±{r['std']:.4f})   {r['std']:.4f}     {r['num_samples']}")
+
+    # Save results to JSON
+    if args.output_json:
+        output_path = args.output_json
+        if not os.path.isabs(output_path):
+            output_path = os.path.join(os.path.dirname(__file__), "..", output_path)
+        with open(output_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to {output_path}")
+
+
+if __name__ == "__main__":
+    main()
