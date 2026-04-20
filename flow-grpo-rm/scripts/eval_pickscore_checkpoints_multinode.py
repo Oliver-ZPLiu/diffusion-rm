@@ -257,6 +257,7 @@ def main():
                 )[0]
 
                 # Compute PickScore
+                images = images.float()
                 scores = pickscore_scorer(prompts, images)
                 all_pickscores.extend(scores.cpu().tolist())
 
