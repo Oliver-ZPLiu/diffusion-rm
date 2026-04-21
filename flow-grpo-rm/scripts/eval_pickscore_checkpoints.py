@@ -215,10 +215,12 @@ def main():
         print(f"Evaluating checkpoint-{step}")
         print(f"{'='*60}")
 
-        # Load LoRA weights
+        # Load LoRA weights (PEFT format saved by train_sd3_fast_rm.py)
         lora_path = os.path.join(checkpoint_path, "lora")
+        lora_loaded = False
         if os.path.exists(lora_path):
-            pipeline.load_lora_weights(lora_path)
+            pipeline.transformer = PeftModel.from_pretrained(pipeline.transformer, lora_path)
+            lora_loaded = True
         else:
             print(f"Warning: LoRA path not found at {lora_path}, using base model")
 
@@ -305,9 +307,9 @@ def main():
 
         print(f"\n  checkpoint-{step}: PickScore = {mean_score:.4f} (±{std_score:.4f})")
 
-        # Unload LoRA for next iteration
-        if os.path.exists(lora_path):
-            pipeline.unload_lora_weights()
+        # Unload LoRA: unwrap PeftModel to restore base transformer for next checkpoint
+        if lora_loaded:
+            pipeline.transformer = pipeline.transformer.get_base_model()
 
     # Print summary
     print("\n" + "="*60)

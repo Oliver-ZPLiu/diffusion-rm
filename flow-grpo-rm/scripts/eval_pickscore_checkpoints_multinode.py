@@ -23,6 +23,7 @@ from torch.distributed.fsdp import ShardingStrategy
 from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob_fast import pipeline_with_logprob as sd3_pipeline_with_logprob
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt as sd3_encode_prompt
 from flow_grpo.pickscore_scorer import PickScoreScorer
+from peft import PeftModel
 
 
 def parse_args():
@@ -212,10 +213,12 @@ def main():
         # Synchronize before loading LoRA
         accelerator.wait_for_everyone()
 
-        # Load LoRA weights (all processes load simultaneously)
+        # Load LoRA weights (PEFT format saved by train_sd3_fast_rm.py)
         lora_path = os.path.join(checkpoint_path, "lora")
+        lora_loaded = False
         if os.path.exists(lora_path):
-            pipeline.load_lora_weights(lora_path)
+            pipeline.transformer = PeftModel.from_pretrained(pipeline.transformer, lora_path)
+            lora_loaded = True
         elif accelerator.is_main_process:
             print(f"Warning: LoRA path not found at {lora_path}, using base model")
 
@@ -280,9 +283,9 @@ def main():
         # Synchronize before unloading LoRA
         accelerator.wait_for_everyone()
 
-        # Unload LoRA
-        if os.path.exists(lora_path):
-            pipeline.unload_lora_weights()
+        # Unload LoRA: unwrap PeftModel to restore base transformer for next checkpoint
+        if lora_loaded:
+            pipeline.transformer = pipeline.transformer.get_base_model()
 
     # Synchronize before printing summary
     accelerator.wait_for_everyone()
