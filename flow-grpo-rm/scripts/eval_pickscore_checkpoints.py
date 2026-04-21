@@ -21,7 +21,8 @@ from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob_fast import pipeline_wi
 from flow_grpo.diffusers_patch.train_dreambooth_lora_flux import encode_prompt as flux_encode_prompt
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt as sd3_encode_prompt
 from flow_grpo.pickscore_scorer import PickScoreScorer
-from peft import PeftModel
+from peft import PeftModel, set_peft_model_state_dict
+from safetensors.torch import load_file
 
 
 def is_sd3_model(model_path):
@@ -209,6 +210,9 @@ def main():
     # Store results
     results = {}
 
+    # Initialize PeftModel with first checkpoint (same pattern as training code)
+    peft_initialized = False
+
     # Evaluate each checkpoint
     for step, checkpoint_path in checkpoints:
         print(f"\n{'='*60}")
@@ -217,10 +221,19 @@ def main():
 
         # Load LoRA weights (PEFT format saved by train_sd3_fast_rm.py)
         lora_path = os.path.join(checkpoint_path, "lora")
-        lora_loaded = False
         if os.path.exists(lora_path):
-            pipeline.transformer = PeftModel.from_pretrained(pipeline.transformer, lora_path)
-            lora_loaded = True
+            if not peft_initialized:
+                # First checkpoint: wrap transformer with PeftModel
+                pipeline.transformer = PeftModel.from_pretrained(pipeline.transformer, lora_path)
+                pipeline.transformer.set_adapter("default")
+                peft_initialized = True
+            else:
+                # Subsequent checkpoints: replace adapter weights in-place
+                adapter_file = os.path.join(lora_path, "adapter_model.safetensors")
+                if not os.path.exists(adapter_file):
+                    adapter_file = os.path.join(lora_path, "adapter_model.bin")
+                state_dict = load_file(adapter_file) if adapter_file.endswith(".safetensors") else torch.load(adapter_file, map_location="cpu")
+                set_peft_model_state_dict(pipeline.transformer, state_dict)
         else:
             print(f"Warning: LoRA path not found at {lora_path}, using base model")
 
@@ -307,9 +320,7 @@ def main():
 
         print(f"\n  checkpoint-{step}: PickScore = {mean_score:.4f} (±{std_score:.4f})")
 
-        # Unload LoRA: unwrap PeftModel to restore base transformer for next checkpoint
-        if lora_loaded:
-            pipeline.transformer = pipeline.transformer.get_base_model()
+        # No need to unload — PeftModel stays, weights get replaced next iteration
 
     # Print summary
     print("\n" + "="*60)
